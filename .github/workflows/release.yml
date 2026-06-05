@@ -103,6 +103,9 @@ jobs:
           repository: ${{ env.SOURCE_REPO }}
           ref: ${{ needs.check.outputs.ref }}
           token: ${{ secrets.FORK_PAT }}
+          # Full history: the projects use Nerdbank.GitVersioning to derive the
+          # build version from git height, which fails on a shallow clone.
+          fetch-depth: 0
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
