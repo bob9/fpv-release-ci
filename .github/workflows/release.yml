@@ -164,7 +164,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          dotnet tool install --global wix
+          # Pin WiX v5: v6/v7 require accepting the paid OSMF EULA (WIX7015),
+          # which blocks unattended CI. v5 is free and uses the v4/wxs schema.
+          dotnet tool install --global wix --version 5.0.2
           $env:Path = "$env:Path;$env:USERPROFILE\.dotnet\tools"
           $ver = "1.0.0.$($env:GITHUB_RUN_NUMBER)"
           @'
