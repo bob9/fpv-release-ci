@@ -1,0 +1,165 @@
+name: Build & Release FPVTrackside
+
+# Lives in a SEPARATE repo from the source, so nothing here can ever appear in a
+# pull request against FPVTracksideCore (or its upstream). It WATCHES the source
+# fork by polling on a schedule — there is no file in the source repo and no
+# external infrastructure. Each new commit on the watched branch is built for
+# every platform and published as a Release INTO the source fork.
+#
+# "Instant on push" is intentionally NOT used: that would require either a
+# workflow file in the source repo (which could leak into an upstream PR) or an
+# external webhook relay. Polling trades a few minutes of latency for zero
+# footprint in the source. You can also run it on demand via "Run workflow".
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to build (branch, tag, or commit SHA)"
+        required: true
+        default: master
+      release_tag:
+        description: "Release tag (blank = auto-<shortsha>)"
+        required: false
+  schedule:
+    # Poll the watched branch every 10 minutes for a new commit. GitHub may delay
+    # or coalesce scheduled runs under load, so treat this as "within ~10-20 min".
+    - cron: "*/10 * * * *"
+
+env:
+  # The source fork that holds the code AND receives the published release.
+  SOURCE_REPO: bob9/FPVTracksideCore
+  # Branch polled on the schedule. You commit straight to master, so this makes
+  # "new master commit" == "new release".
+  WATCH_BRANCH: master
+  DOTNET_VERSION: "9.0.x"
+
+jobs:
+  # Decide whether there is a new commit that hasn't been released yet. State is
+  # the existence of the auto-<shortsha> release on the fork — no extra storage.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+      ref: ${{ steps.decide.outputs.ref }}
+      tag: ${{ steps.decide.outputs.tag }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ secrets.FORK_PAT }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ref_in="${{ inputs.ref }}"
+            sha=$(gh api "repos/$SOURCE_REPO/commits/$ref_in" --jq .sha)
+            tag="${{ inputs.release_tag }}"
+            [ -z "$tag" ] && tag="auto-${sha:0:7}"
+            {
+              echo "should_build=true"
+              echo "ref=$sha"
+              echo "tag=$tag"
+            } >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Scheduled poll: build only if the branch tip isn't already released.
+          sha=$(gh api "repos/$SOURCE_REPO/commits/$WATCH_BRANCH" --jq .sha)
+          tag="auto-${sha:0:7}"
+          if gh release view "$tag" --repo "$SOURCE_REPO" >/dev/null 2>&1; then
+            echo "should_build=false" >>"$GITHUB_OUTPUT"
+            echo "No new commit on $WATCH_BRANCH (tip $sha already released as $tag)."
+          else
+            {
+              echo "should_build=true"
+              echo "ref=$sha"
+              echo "tag=$tag"
+            } >>"$GITHUB_OUTPUT"
+            echo "New commit $sha -> will build and release $tag."
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            project: FPVTracksideCore/FPVTracksideCore.csproj
+            asset: FPVTrackside-win-x64
+          - os: macos-latest
+            rid: osx-arm64
+            project: FPVMacSideCore/FPVMacsideCore.csproj
+            asset: FPVMacside-osx-arm64
+          - os: ubuntu-latest
+            rid: linux-x64
+            project: FPVTuxSideCore/FPVTuxsideCore.csproj
+            asset: FPVTuxside-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out the source fork at the new commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ needs.check.outputs.ref }}
+          token: ${{ secrets.FORK_PAT }}
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Publish ${{ matrix.rid }}
+        run: >
+          dotnet publish ${{ matrix.project }}
+          -c Release
+          -r ${{ matrix.rid }}
+          --self-contained true
+          -o publish/${{ matrix.asset }}
+
+      - name: Zip (Unix)
+        if: runner.os != 'Windows'
+        run: cd publish && zip -r ${{ matrix.asset }}.zip ${{ matrix.asset }}
+
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path publish/${{ matrix.asset }}/* -DestinationPath publish/${{ matrix.asset }}.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: publish/${{ matrix.asset }}.zip
+
+  release:
+    needs: [check, build]
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all platform zips
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release into the fork
+        env:
+          GH_TOKEN: ${{ secrets.FORK_PAT }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.check.outputs.tag }}"
+          # Idempotent: a manual re-run of an already-released commit updates the
+          # existing release's assets instead of failing on a duplicate tag.
+          if gh release view "$tag" --repo "$SOURCE_REPO" >/dev/null 2>&1; then
+            echo "Release $tag exists — replacing its assets."
+            gh release upload "$tag" --repo "$SOURCE_REPO" --clobber dist/*.zip
+          else
+            gh release create "$tag" \
+              --repo "$SOURCE_REPO" \
+              --target "${{ needs.check.outputs.ref }}" \
+              --title "$tag" \
+              --notes "Automated multi-platform build of ${{ needs.check.outputs.ref }}" \
+              --prerelease \
+              dist/*.zip
+          fi
