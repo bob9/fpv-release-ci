@@ -120,20 +120,88 @@ jobs:
           --self-contained true
           -o publish/${{ matrix.asset }}
 
-      - name: Zip (Unix)
-        if: runner.os != 'Windows'
+      # Linux: ship a plain zip of the self-contained publish folder.
+      - name: Package Linux (.zip)
+        if: runner.os == 'Linux'
         run: cd publish && zip -r ${{ matrix.asset }}.zip ${{ matrix.asset }}
 
-      - name: Zip (Windows)
+      # macOS: wrap the publish output in a .app bundle and build a draggable .dmg
+      # (with an /Applications symlink). Unsigned — users right-click > Open once.
+      - name: Package macOS (.dmg)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app="FPVTrackside.app"
+          rm -rf "$app" dmgroot
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp -R "publish/${{ matrix.asset }}/." "$app/Contents/MacOS/"
+          chmod +x "$app/Contents/MacOS/FPVMacsideCore"
+          cat > "$app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <plist version="1.0">
+          <dict>
+          <key>CFBundleName</key><string>FPVTrackside</string>
+          <key>CFBundleDisplayName</key><string>FPVTrackside</string>
+          <key>CFBundleIdentifier</key><string>com.bob9.fpvtrackside</string>
+          <key>CFBundleVersion</key><string>1.0</string>
+          <key>CFBundleShortVersionString</key><string>1.0</string>
+          <key>CFBundleExecutable</key><string>FPVMacsideCore</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>LSMinimumSystemVersion</key><string>11.0</string>
+          <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          mkdir dmgroot
+          cp -R "$app" dmgroot/
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname "FPVTrackside" -srcfolder dmgroot -ov -format UDZO "publish/${{ matrix.asset }}.dmg"
+
+      # Windows: build an MSI with the WiX Toolset. Files are auto-harvested from
+      # the publish folder; a Start Menu shortcut points at FPVTracksideCore.exe.
+      # Version increments per run so MajorUpgrade can replace older installs.
+      - name: Package Windows (.msi via WiX)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path publish/${{ matrix.asset }}/* -DestinationPath publish/${{ matrix.asset }}.zip
+        run: |
+          dotnet tool install --global wix
+          $env:Path = "$env:Path;$env:USERPROFILE\.dotnet\tools"
+          $ver = "1.0.0.$($env:GITHUB_RUN_NUMBER)"
+          @'
+          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+            <Package Name="FPVTrackside" Manufacturer="bob9" Version="__VERSION__"
+                     UpgradeCode="6f1d3a2e-9c4b-4f7a-9b2e-1a2b3c4d5e6f" Scope="perMachine">
+              <MajorUpgrade DowngradeErrorMessage="A newer version of FPVTrackside is already installed." />
+              <MediaTemplate EmbedCab="yes" />
+              <StandardDirectory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLFOLDER" Name="FPVTrackside" />
+              </StandardDirectory>
+              <StandardDirectory Id="ProgramMenuFolder">
+                <Directory Id="AppShortcutFolder" Name="FPVTrackside" />
+              </StandardDirectory>
+              <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+                <Files Include="publish\FPVTrackside-win-x64\**" />
+              </ComponentGroup>
+              <Component Id="AppShortcut" Directory="AppShortcutFolder" Guid="7a2e4b1c-0d5f-4a8b-9c3d-2b4e6f8a0c1d">
+                <Shortcut Id="StartMenuShortcut" Name="FPVTrackside"
+                          Target="[INSTALLFOLDER]FPVTracksideCore.exe" WorkingDirectory="INSTALLFOLDER" />
+                <RemoveFolder Id="RemoveAppShortcutFolder" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="Software\bob9\FPVTrackside" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+              </Component>
+              <Feature Id="Main">
+                <ComponentGroupRef Id="AppFiles" />
+                <ComponentRef Id="AppShortcut" />
+              </Feature>
+            </Package>
+          </Wix>
+          '@ -replace '__VERSION__', $ver | Out-File -Encoding utf8 Package.wxs
+          wix build Package.wxs -arch x64 -o "publish/${{ matrix.asset }}.msi"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: publish/${{ matrix.asset }}.zip
+          path: publish/${{ matrix.asset }}.*
 
   release:
     needs: [check, build]
@@ -156,7 +224,7 @@ jobs:
           # existing release's assets instead of failing on a duplicate tag.
           if gh release view "$tag" --repo "$SOURCE_REPO" >/dev/null 2>&1; then
             echo "Release $tag exists — replacing its assets."
-            gh release upload "$tag" --repo "$SOURCE_REPO" --clobber dist/*.zip
+            gh release upload "$tag" --repo "$SOURCE_REPO" --clobber dist/*
           else
             gh release create "$tag" \
               --repo "$SOURCE_REPO" \
@@ -164,5 +232,5 @@ jobs:
               --title "$tag" \
               --notes "Automated multi-platform build of ${{ needs.check.outputs.ref }}" \
               --prerelease \
-              dist/*.zip
+              dist/*
           fi
