@@ -211,11 +211,122 @@ jobs:
     if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Download all platform zips
+      # Need the source (with full history) for two things the release page shows:
+      # the Nerdbank.GitVersioning version and the recent-commits changelog.
+      - name: Check out the source fork at the built commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ needs.check.outputs.ref }}
+          token: ${{ secrets.FORK_PAT }}
+          fetch-depth: 0
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Download all platform builds
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      # Compute the version, rename the raw build outputs to friendly versioned
+      # names (carrying the short sha so every automated build is uniquely named),
+      # and write the formatted release notes.
+      - name: Assemble release (version, asset names, notes)
+        id: assemble
+        env:
+          REF: ${{ needs.check.outputs.ref }}
+        run: |
+          set -euo pipefail
+          short_sha="${REF:0:7}"
+
+          # Version from Nerdbank.GitVersioning (root version.json, git-height
+          # based). Fall back to the short sha if nbgv is ever unavailable.
+          dotnet tool install --global nbgv >/dev/null 2>&1 || true
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          version="$(nbgv get-version -v Version 2>/dev/null || true)"
+          [ -z "$version" ] && version="0.0.0-${short_sha}"
+
+          # Friendly, versioned asset names used both for the uploaded files and
+          # in the Downloads section of the notes.
+          mac_name="FPVTrackside-macOS-v${version}-${short_sha}.dmg"
+          win_name="FPVTrackside-Windows-v${version}-${short_sha}.msi"
+          lin_name="FPVTrackside-Linux-v${version}-${short_sha}.zip"
+
+          # Rename whatever each platform produced. Guard each copy so a single
+          # failed platform (fail-fast is off) never blocks the whole release.
+          mkdir -p out
+          [ -f dist/FPVMacside-osx-arm64.dmg ] && cp dist/FPVMacside-osx-arm64.dmg "out/${mac_name}"
+          [ -f dist/FPVTrackside-win-x64.msi ] && cp dist/FPVTrackside-win-x64.msi "out/${win_name}"
+          [ -f dist/FPVTuxside-linux-x64.zip ] && cp dist/FPVTuxside-linux-x64.zip "out/${lin_name}"
+
+          # Last 10 commits as markdown links into the source repo.
+          changelog="$(git log -10 --pretty=format:"- [\`%h\`](https://github.com/${SOURCE_REPO}/commit/%H) %s")"
+
+          notes_file="$(pwd)/RELEASE_NOTES.md"
+          # Dynamic top half (variable expansion on; backticks escaped).
+          cat > "$notes_file" <<EOF
+          ## 🚀 FPVTrackside Release v${version}
+
+          ### 📦 Downloads
+          - **macOS (Apple Silicon):** \`${mac_name}\`
+          - **Windows (x64):** \`${win_name}\`
+          - **Linux (x64):** \`${lin_name}\`
+
+          ### 🔧 Platform Versions
+          - **macOS Version:** ${version}
+          - **Windows Version:** ${version}
+          - **Linux Version:** ${version}
+
+          ### 🔄 Recent Changes
+          ${changelog}
+
+          EOF
+          # Static bottom half (quoted heredoc: no expansion, raw backticks OK).
+          cat >> "$notes_file" <<'EOF'
+          ### 📋 System Requirements
+          **macOS**
+          - macOS 11 (Big Sur) or later
+          - Apple Silicon (M1/M2/M3) processor
+          - Screen-recording permission may be required for screen-capture features
+
+          **Windows**
+          - Windows 10 x64 or later
+          - No .NET install required — the runtime is bundled (self-contained build)
+
+          **Linux**
+          - 64-bit (x64) distribution
+          - No .NET install required — the runtime is bundled (self-contained build)
+
+          ### 📥 Installation
+          **macOS**
+          1. Download the macOS `.dmg` file
+          2. Double-click the DMG to mount it
+          3. Drag **FPVTrackside.app** to your Applications folder
+          4. Eject the DMG when finished
+          5. Right-click the app and choose **Open** on first launch (unsigned — Gatekeeper)
+          6. Grant screen-recording permission if using screen capture
+
+          **Windows**
+          1. Download the Windows `.msi` installer
+          2. Double-click the MSI to run the installer
+          3. Follow the installation wizard
+          4. Launch FPVTrackside from the Start Menu
+          5. Windows Defender SmartScreen may require approval on first launch
+
+          **Linux**
+          1. Download the Linux `.zip`
+          2. Extract it
+          3. Run the `FPVTuxsideCore` binary from the extracted folder
+          EOF
+
+          {
+            echo "version=$version"
+            echo "notes_file=$notes_file"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Publish release into the fork
         env:
@@ -223,17 +334,23 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ needs.check.outputs.tag }}"
-          # Idempotent: a manual re-run of an already-released commit updates the
-          # existing release's assets instead of failing on a duplicate tag.
+          title="FPVTrackside v${{ steps.assemble.outputs.version }}"
+          notes_file="${{ steps.assemble.outputs.notes_file }}"
+          # Idempotent: a manual re-run of an already-released commit refreshes the
+          # existing release's title, notes and assets instead of failing on a
+          # duplicate tag. Published as a full Latest release (not a pre-release).
           if gh release view "$tag" --repo "$SOURCE_REPO" >/dev/null 2>&1; then
-            echo "Release $tag exists — replacing its assets."
-            gh release upload "$tag" --repo "$SOURCE_REPO" --clobber dist/*
+            echo "Release $tag exists — refreshing title, notes and assets."
+            gh release edit "$tag" --repo "$SOURCE_REPO" \
+              --title "$title" --notes-file "$notes_file" \
+              --prerelease=false --latest
+            gh release upload "$tag" --repo "$SOURCE_REPO" --clobber out/*
           else
             gh release create "$tag" \
               --repo "$SOURCE_REPO" \
               --target "${{ needs.check.outputs.ref }}" \
-              --title "$tag" \
-              --notes "Automated multi-platform build of ${{ needs.check.outputs.ref }}" \
-              --prerelease \
-              dist/*
+              --title "$title" \
+              --notes-file "$notes_file" \
+              --latest \
+              out/*
           fi
