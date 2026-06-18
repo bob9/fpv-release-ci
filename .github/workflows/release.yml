@@ -22,9 +22,10 @@ on:
         description: "Release tag (blank = auto-<shortsha>)"
         required: false
   schedule:
-    # Poll the watched branch every 10 minutes for a new commit. GitHub may delay
-    # or coalesce scheduled runs under load, so treat this as "within ~10-20 min".
-    - cron: "*/10 * * * *"
+        # Poll the watched branch every 5 minutes for a new commit. GitHub may delay
+    # or coalesce scheduled runs under load (5 min is the effective floor), so
+    # treat this as "within ~5-20 min".
+    - cron: "*/5 * * * *"
 
 env:
   # The source fork that holds the code AND receives the published release.
