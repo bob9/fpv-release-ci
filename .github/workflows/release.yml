@@ -150,6 +150,21 @@ jobs:
           <key>CFBundlePackageType</key><string>APPL</string>
           <key>LSMinimumSystemVersion</key><string>11.0</string>
           <key>NSHighResolutionCapable</key><true/>
+          <!--
+            REQUIRED for any video or audio capture. macOS does not merely deny a
+            capture session when these are absent - it kills the process with
+            SIGABRT (exit 134) the moment it touches the device, and shows no
+            permission prompt at all. Device *enumeration* still works without
+            them, so the app looks healthy: cameras and modes list correctly and
+            then every capture silently yields a black screen.
+
+            The kill applies to the bundled ffmpeg child process too, since TCC
+            attributes it to this bundle. Verified by building two identical
+            unsigned bundles differing only in these keys: without them, abort
+            with no prompt; with them, the prompt appears and capture succeeds.
+          -->
+          <key>NSCameraUsageDescription</key><string>FPVTrackside uses your cameras and video capture cards to show and record race video.</string>
+          <key>NSMicrophoneUsageDescription</key><string>FPVTrackside uses audio input devices to record commentary alongside race video.</string>
           </dict>
           </plist>
           PLIST
