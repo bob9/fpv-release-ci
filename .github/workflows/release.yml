@@ -147,20 +147,29 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      # The bracket web app (/brackets) is a Nuxt build embedded into Webb.dll,
-      # so it must exist before dotnet publish. Skipped for source commits that
-      # predate it (the DLL then serves a "not built" page).
-      - name: Set up Node (bracket web app)
-        if: hashFiles('BracketsUI/package.json') != ''
+      # The stages web app (/stages; /brackets before it was renamed) is a Nuxt
+      # build embedded into Webb.dll, so it must exist before dotnet publish.
+      # Skipped for source commits that predate it (the DLL then serves a
+      # "not built" page).
+      - name: Find the web app
+        id: webapp
+        shell: bash
+        run: |
+          if [ -f StagesUI/package.json ]; then echo "dir=StagesUI" >> "$GITHUB_OUTPUT"
+          elif [ -f BracketsUI/package.json ]; then echo "dir=BracketsUI" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node (web app)
+        if: steps.webapp.outputs.dir != ''
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: BracketsUI/package-lock.json
+          cache-dependency-path: ${{ steps.webapp.outputs.dir }}/package-lock.json
 
-      - name: Build the bracket web app
-        if: hashFiles('BracketsUI/package.json') != ''
-        working-directory: BracketsUI
+      - name: Build the web app
+        if: steps.webapp.outputs.dir != ''
+        working-directory: ${{ steps.webapp.outputs.dir }}
         shell: bash
         run: npm ci && npm run generate
 
