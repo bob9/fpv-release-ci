@@ -21,6 +21,12 @@ on:
       release_tag:
         description: "Release tag (blank = auto-<shortsha>)"
         required: false
+  # Build request: committing build-request.txt (line 1 = ref to build, line 2 =
+  # optional release tag) builds that ref — the way to ask for a branch build
+  # from a machine with git access but no GitHub token.
+  push:
+    branches: [main]
+    paths: [build-request.txt]
   schedule:
         # Poll the watched branch every 5 minutes for a new commit. GitHub may delay
     # or coalesce scheduled runs under load (5 min is the effective floor), so
@@ -44,7 +50,17 @@ jobs:
       should_build: ${{ steps.decide.outputs.should_build }}
       ref: ${{ steps.decide.outputs.ref }}
       tag: ${{ steps.decide.outputs.tag }}
+      # true for a build of anything other than the watched branch: published as
+      # a pre-release so it never becomes "Latest".
+      preview: ${{ steps.decide.outputs.preview }}
     steps:
+      - name: Read the build request
+        if: github.event_name == 'push'
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: build-request.txt
+          sparse-checkout-cone-mode: false
+
       - id: decide
         env:
           GH_TOKEN: ${{ secrets.FORK_PAT }}
@@ -55,10 +71,28 @@ jobs:
             sha=$(gh api "repos/$SOURCE_REPO/commits/$ref_in" --jq .sha)
             tag="${{ inputs.release_tag }}"
             [ -z "$tag" ] && tag="auto-${sha:0:7}"
+            preview=true
+            [ "$ref_in" = "$WATCH_BRANCH" ] && preview=false
             {
               echo "should_build=true"
               echo "ref=$sha"
               echo "tag=$tag"
+              echo "preview=$preview"
+            } >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ref_in=$(sed -n 1p build-request.txt | tr -d '[:space:]')
+            tag=$(sed -n 2p build-request.txt | tr -d '[:space:]')
+            sha=$(gh api "repos/$SOURCE_REPO/commits/$ref_in" --jq .sha)
+            [ -z "$tag" ] && tag="auto-${sha:0:7}"
+            preview=true
+            [ "$ref_in" = "$WATCH_BRANCH" ] && preview=false
+            {
+              echo "should_build=true"
+              echo "ref=$sha"
+              echo "tag=$tag"
+              echo "preview=$preview"
             } >>"$GITHUB_OUTPUT"
             exit 0
           fi
@@ -354,6 +388,12 @@ jobs:
           tag="${{ needs.check.outputs.tag }}"
           title="FPVTrackside v${{ steps.assemble.outputs.version }}"
           notes_file="${{ steps.assemble.outputs.notes_file }}"
+          # A branch preview is a pre-release and never "Latest".
+          if [ "${{ needs.check.outputs.preview }}" = "true" ]; then
+            kind=(--prerelease --latest=false)
+          else
+            kind=(--prerelease=false --latest)
+          fi
           # Idempotent: a manual re-run of an already-released commit refreshes the
           # existing release's title, notes and assets instead of failing on a
           # duplicate tag. Published as a full Latest release (not a pre-release).
@@ -361,7 +401,7 @@ jobs:
             echo "Release $tag exists — refreshing title, notes and assets."
             gh release edit "$tag" --repo "$SOURCE_REPO" \
               --title "$title" --notes-file "$notes_file" \
-              --prerelease=false --latest
+              "${kind[@]}"
             gh release upload "$tag" --repo "$SOURCE_REPO" --clobber out/*
           else
             gh release create "$tag" \
@@ -369,6 +409,6 @@ jobs:
               --target "${{ needs.check.outputs.ref }}" \
               --title "$title" \
               --notes-file "$notes_file" \
-              --latest \
+              "${kind[@]}" \
               out/*
           fi
