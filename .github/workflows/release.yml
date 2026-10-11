@@ -113,6 +113,23 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      # The bracket web app (/brackets) is a Nuxt build embedded into Webb.dll,
+      # so it must exist before dotnet publish. Skipped for source commits that
+      # predate it (the DLL then serves a "not built" page).
+      - name: Set up Node (bracket web app)
+        if: hashFiles('BracketsUI/package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: BracketsUI/package-lock.json
+
+      - name: Build the bracket web app
+        if: hashFiles('BracketsUI/package.json') != ''
+        working-directory: BracketsUI
+        shell: bash
+        run: npm ci && npm run generate
+
       - name: Publish ${{ matrix.rid }}
         run: >
           dotnet publish ${{ matrix.project }}
