@@ -403,6 +403,11 @@ jobs:
               --title "$title" --notes-file "$notes_file" \
               "${kind[@]}"
             gh release upload "$tag" --repo "$SOURCE_REPO" --clobber out/*
+            # A re-used tag (e.g. a branch preview) keeps only this build's files.
+            keep=$(cd out && ls)
+            gh release view "$tag" --repo "$SOURCE_REPO" --json assets --jq '.assets[].name' | while read -r a; do
+              echo "$keep" | grep -qxF "$a" || gh release delete-asset "$tag" "$a" --repo "$SOURCE_REPO" --yes
+            done
           else
             gh release create "$tag" \
               --repo "$SOURCE_REPO" \
